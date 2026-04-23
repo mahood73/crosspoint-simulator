@@ -1,4 +1,5 @@
 #include "HalGPIO.h"
+#include "SimTextInput.h"
 
 #include <SDL2/SDL.h>
 
@@ -54,7 +55,19 @@ void HalGPIO::update() {
   while (SDL_PollEvent(&e) != 0) {
     if (e.type == SDL_QUIT) {
       quitRequested.store(true);
+    } else if (e.type == SDL_TEXTINPUT) {
+      SimTextInput::pushText(e.text.text);
     } else if (e.type == SDL_KEYDOWN && !e.key.repeat) {
+      if (SimTextInput::isCaptureEnabled()) {
+        if (e.key.keysym.scancode == SDL_SCANCODE_BACKSPACE) {
+          SimTextInput::pushBackspace();
+          continue;
+        }
+        if (e.key.keysym.scancode == SDL_SCANCODE_RETURN) {
+          SimTextInput::pushNewline();
+          continue;
+        }
+      }
       int btn = scancodeToButton(e.key.keysym.scancode);
       if (btn >= 0) {
         pressedThisFrame[btn] = true;
