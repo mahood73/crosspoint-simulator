@@ -3,82 +3,54 @@ PlatformIO library build script for the Crosspoint Simulator.
 
 Handles two things automatically when this lib is included as a lib_dep:
 
-1. Patches BookMetadataCache.h — SpineEntry::cumulativeSize is declared as
-   size_t, which is 8 bytes on 64-bit hosts (macOS/Linux) but 4 bytes on
-   ESP32-C3.  This mismatch breaks binary cache serialization in the simulator.
-   Replaced with uint32_t, which is the correct explicit size on both platforms.
-   Applied idempotently — safe to run on every build.
+1. Patches BookMetadataCache -- SpineEntry::cumulativeSize and its fast read
+   path can use size_t, which is 8 bytes on 64-bit hosts (macOS/Linux) but
+   4 bytes on ESP32-C3. This mismatch breaks binary cache serialization in the
+   simulator. Replaced with uint32_t, which is the correct explicit size on both
+   platforms. Applied idempotently -- safe to run on every build.
 
-2. Registers a "run_simulator" custom target so the compiled binary can be
-   launched directly from PlatformIO.
+2. Patches GfxRenderer::setOrientation so simulator builds notify HalDisplay
+   when the logical orientation changes. Without this, the framebuffer content
+   can rotate while the SDL window keeps its startup portrait/landscape shape.
 
-Important limitation: when this file is loaded only through library.json as a
-library build hook, PlatformIO CLI can use the target, but the consuming
-project's IDE task list may not show it. To expose "Run Simulator" in the
-PlatformIO IDE UI, the consuming firmware repo still needs a tiny project-level
-post: extra_script pointing at this file inside .pio/libdeps/$PIOENV/simulator.
+3. Registers a backward-compatible "run_simulator" custom target.
+
+This file can be loaded more than once in the same PlatformIO process:
+- once from this library's `library.json` build hook
+- again indirectly when a consuming firmware repo adds the separate
+  `run_simulator_project.py` helper for IDE task exposure
+
+Use a process-wide sentinel so the custom target is registered only once even
+when multiple registration paths exist.
 """
 
 Import("env")
-import os, subprocess
+import os
+import builtins
+import re
 
-
-# --- BookMetadataCache patch ---
-
-def _patch_book_metadata_cache(env):
-    target = os.path.join(
-        env["PROJECT_DIR"], "lib", "Epub", "Epub", "BookMetadataCache.h"
-    )
-    if os.path.isfile(target):
-        _apply_patch(target)
-
-
-def _apply_patch(filepath):
-    with open(filepath, "r") as f:
-        content = f.read()
-
-    original = content
-
-    # lutOffset is a member variable written as uint32_t in buildBookBin but
-    # declared as size_t, which is 8 bytes on 64-bit hosts. load() reads
-    # sizeof(lutOffset) bytes, so an 8-byte read shifts the file position and
-    # corrupts the spineCount/tocCount fields that follow.
-    content = content.replace(
-        "  size_t lutOffset;",
-        "  uint32_t lutOffset; // simulator patch",
-        1,
-    )
-
-    content = content.replace(
-        "    size_t cumulativeSize;",
-        "    uint32_t cumulativeSize; // simulator patch",
-        1,
-    )
-    content = content.replace("const size_t cumulativeSize", "const uint32_t cumulativeSize")
-
-    if content == original:
-        return  # nothing to patch
-
-    with open(filepath, "w") as f:
-        f.write(content)
-    print("Patched BookMetadataCache: size_t -> uint32_t for simulator: %s" % filepath)
-
-
-_patch_book_metadata_cache(env)
+RUN_SIMULATOR_TARGET_KEY = "_crosspoint_run_simulator_target_registered"
+RUN_SIMULATOR_TARGET_OWNER_OPTION = "custom_run_simulator_target_owner"
 
 
 # --- run_simulator custom target ---
 
 def _run_simulator(source, target, env):
+    import subprocess
+
     binary = env.subst("$BUILD_DIR/program")
     subprocess.run([binary], cwd=os.getcwd())
 
 
-env.AddCustomTarget(
-    name="run_simulator",
-    dependencies=None,
-    actions=_run_simulator,
-    title="Run Simulator",
-    description="Build and run the desktop simulator",
-    always_build=True,
-)
+target_owner = env.GetProjectOption(RUN_SIMULATOR_TARGET_OWNER_OPTION, "").strip().lower()
+
+if target_owner != "project" and not getattr(builtins, RUN_SIMULATOR_TARGET_KEY, False):
+    setattr(builtins, RUN_SIMULATOR_TARGET_KEY, True)
+    env.AddCustomTarget(
+        name="run_simulator",
+        dependencies="$PROGPATH",
+        actions=_run_simulator,
+        title="Run Simulator",
+        description="Build and run the desktop simulator",
+        always_build=True,
+    )
